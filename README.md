@@ -76,7 +76,7 @@ no limit.
  80     1546 MHz   80.08 W     2642     33.0
  90     1611 MHz   90.11 W     2745     30.5
 100     1620 MHz   95.03 W     2763     29.1
-uncap   1620 MHz   96.57 W     2761    28.6
+uncap   1620 MHz   96.57 W     2761     28.6
 ```
 
 How to read this table:
@@ -88,10 +88,9 @@ How to read this table:
 - The 5 W step sits on the lowest hardware clock (338 MHz). It gives 107
   GFLOPS per watt. That is 3.6 times better than full power.
 
-## The zero trap
+## Negative is uncapped
 
-Do not write `AbsoluteTarget = 0` to remove a limit. On M5, `0` means
-"target zero watts". The firmware then parks the GPU at its lowest clock
+On M5, `0` means "target zero watts". The firmware then parks the GPU at its lowest clock
 (338 MHz). It stays there under load, even when thermals are normal.
 
 Write a negative target instead:
