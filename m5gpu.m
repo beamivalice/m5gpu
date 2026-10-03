@@ -7,6 +7,7 @@
 //
 // Commands:
 //   status            cap + live power readout (no root needed)
+//   cap <watts>       set GPU power limit to <watts> (root)
 //   sweep             GFLOPS at 5/10/15/20 W caps + uncapped (root)
 //   burn [seconds]    full-speed burn with 500 ms telemetry (root)
 
@@ -19,6 +20,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <math.h>
+#include <errno.h>
+#include <stdint.h>
 
 // ─── terminal ────────────────────────────────────────────────────────────────
 
@@ -63,7 +66,7 @@ static int64_t agx_get(const char *key) {
 }
 
 /// Write { SetMaxGPUAbsolutePower: true, AbsoluteTarget: milliwatts }.
-/// Returns the value that actually landed (0 = cleared), or -1 on IOKit error.
+/// Returns the value that actually landed (negative = uncapped), or -1 on error.
 static int64_t agx_set_power_cap(int64_t milliwatts) {
     io_service_t svc = get_agx();
     if (!svc) return -1;
@@ -259,11 +262,63 @@ static PmStats pm_stop(void) {
 
 // ─── commands ────────────────────────────────────────────────────────────────
 
-static void cmd_status(void) {
+/// Set the GPU power limit to <watts> and leave it active.
+/// A positive value caps power at that level. A negative value removes the
+/// limit entirely (written as -1000). Zero is refused — on M5 it means
+/// "target zero watts" and parks the GPU at its frequency floor.
+static void cmd_cap(int argc, char **argv) {
+    if (argc != 3) {
+        LOG_ERR("usage: sudo %s cap <watts>", getprogname());
+        exit(1);
+    }
+    long long watts = -1;
+    if (strcmp(argv[2], "off") != 0 && strcmp(argv[2], "uncap") != 0) {
+        const char *digits = argv[2];
+        if (*digits == '-') digits++;
+        if (!*digits || strspn(digits, "0123456789") != strlen(digits)) {
+            LOG_ERR("cap must be a positive integer wattage or 'off'");
+            exit(1);
+        }
+        errno = 0;
+        char *end = NULL;
+        watts = strtoll(argv[2], &end, 10);
+        if (errno == ERANGE || *end || watts > INT64_MAX / 1000 || watts == 0) {
+            LOG_ERR("invalid wattage; zero parks the GPU. Use a positive integer or 'off'");
+            exit(1);
+        }
+    }
+    if (geteuid() != 0) { LOG_ERR("cap needs root, hint: sudo ./m5gpu cap 40"); exit(1); }
+    if (!get_agx()) { LOG_ERR("AGXAccelerator not found"); exit(1); }
+    int64_t want = watts < 0 ? -1000 : (int64_t)watts * 1000;
+
+    int64_t got = agx_set_power_cap(want);
+    if (got != want) {
+        LOG_ERR("cap did not land (driver accepted %lld, wanted %lld)", got, want);
+        exit(1);
+    }
+    if (watts < 0)
+        LOG_OK("power limit removed — full boost restored");
+    else
+        LOG_OK("GPU capped at %lld W", watts);
+}
+
+static void cmd_status(int json) {
     io_service_t svc = get_agx();
     if (!svc) { LOG_ERR("AGXAccelerator not found"); exit(1); }
     int64_t cap = agx_get("MaxGPUAbsolutePower");
     int64_t mw = agx_get("FilteredGPUPower");
+    if (json) {
+        if (cap == -1 || mw < 0) {
+            LOG_ERR("GPU power properties unavailable");
+            exit(1);
+        }
+        printf("{\"cap_milliwatts\":%lld,\"cap_watts\":", cap);
+        if (cap >= 0) printf("%.3f", cap / 1000.0);
+        else printf("null");
+        printf(",\"capped\":%s,\"draw_watts\":%.3f}\n",
+               cap >= 0 ? "true" : "false", mw / 1000.0);
+        return; // telemetry only; do not run a benchmark for MCP polling
+    }
     printf("%sGPU power status%s\n", g_color?C_BOLD:"", g_color?C_RESET:"");
     if (cap > 0) printf("  cap:      %lld W\n", cap / 1000);
     else          printf("  cap:      none (0)\n");
@@ -358,6 +413,9 @@ static void cmd_sweep(int argc, char **argv) {
 static void usage(const char *prog) {
     printf("usage:\n");
     printf("  %s status            cap + live power (no root)\n", prog);
+    printf("  %s status --json     JSON telemetry without a benchmark\n", prog);
+    printf("  sudo %s cap <watts>  set GPU power limit to <watts>\n", prog);
+    printf("  sudo %s cap off      remove the power limit (restores boost)\n", prog);
     printf("  sudo %s sweep        GFLOPS at 5..100 W caps + uncapped\n", prog);
     printf("  sudo %s burn [sec]   full-speed burn w/ live telemetry\n", prog);
 }
@@ -366,9 +424,16 @@ int main(int argc, char **argv) {
     if (!isatty(STDOUT_FILENO)) g_color = 0;
     const char *cmd = argc > 1 ? argv[1] : "status";
 
-    if (strcmp(cmd, "status") == 0) cmd_status();
+    if (strcmp(cmd, "status") == 0) {
+        if (argc > 3 || (argc == 3 && strcmp(argv[2], "--json") != 0)) {
+            usage(argv[0]);
+            return 1;
+        }
+        cmd_status(argc == 3);
+    }
+    else if (strcmp(cmd, "cap") == 0) cmd_cap(argc, argv);
     else if (strcmp(cmd, "sweep") == 0) cmd_sweep(argc, argv);
     else if (strcmp(cmd, "burn") == 0) cmd_burn(argc > 2 ? atoi(argv[2]) : 20);
-    else usage(argv[0]);
+    else { usage(argv[0]); return 1; }
     return 0;
 }

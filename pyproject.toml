@@ -1,0 +1,16 @@
+[project]
+name = "m5gpu-mcp"
+version = "0.1.0"
+description = "Local MCP tools for Apple M5 GPU power control"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.12,<2"]
+
+[project.scripts]
+m5gpu-mcp = "m5gpu_mcp:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+include = ["m5gpu_mcp.py"]

@@ -38,13 +38,111 @@ You need macOS on an Apple M5 Mac and Xcode Command Line Tools.
 
 ```bash
 m5gpu status                 # show limit and live power (no root)
+m5gpu status --json          # machine-readable telemetry, no benchmark
+sudo m5gpu cap 40            # set the GPU power limit to 40 W (root)
+sudo m5gpu cap off           # remove the limit, restore stock behavior (root)
 sudo m5gpu sweep             # measure 5..100 W steps + no-limit (root)
 sudo m5gpu sweep 20 40       # measure only the limits you list
 sudo m5gpu burn [seconds]    # full-speed burn with live telemetry (root)
 ```
 
+`cap` writes the limit and exits. The limit stays active after the tool
+exits — for this tool and every other app — until you run `cap off`.
+`cap 0` is refused on purpose: on M5 it means "target zero watts" and parks
+the GPU at its frequency floor.
+
 `sweep` ends by writing `-1000`. This disables the limit and restores stock
 GPU behavior.
+
+## MCP server for agents
+
+The local stdio server exposes three tools:
+
+| Tool | Effect |
+|---|---|
+| `get_gpu_power_status` | Read accepted cap and filtered draw in watts, without a GPU benchmark |
+| `set_gpu_power_limit(watts)` | Set a system-wide cap using a whole number from 1 to 100 W by default |
+| `remove_gpu_power_limit` | Write `-1000` to restore stock behavior |
+
+Results contain `cap_milliwatts`, `cap_watts`, `capped`, and `draw_watts`.
+An uncapped driver value produces `cap_watts: null` and `capped: false`.
+Zero is reported as a zero-watt target, not as uncapped. Missing driver
+properties, rejected writes, and permission failures return MCP tool errors.
+
+Build the native executable and install the Python dependencies (Python 3.10+
+and [uv](https://docs.astral.sh/uv/) required):
+
+```bash
+cd /Users/beam/llm/m5gpu
+make
+uv sync --locked
+uv run m5gpu-mcp
+```
+
+The server waits for MCP messages on stdin. Only protocol messages go to
+stdout. Use absolute paths when configuring your agent so startup does not
+depend on its working directory. For a client using `mcpServers` JSON:
+
+```json
+{
+  "mcpServers": {
+    "m5gpu": {
+      "command": "/Users/beam/.local/bin/uv",
+      "args": [
+        "run", "--locked", "--directory", "/Users/beam/llm/m5gpu",
+        "m5gpu-mcp", "--binary", "/Library/PrivilegedHelperTools/m5gpu",
+        "--max-watts", "100"
+      ]
+    }
+  }
+}
+```
+
+Replace the uv and repository paths for other machines. `--max-watts` is an
+agent input bound, not a measured hardware maximum. The driver determines
+actual power draw. Existing limits can exceed that bound and are still
+reported faithfully. The default binary is `m5gpu` beside the Python module;
+pass `--binary` explicitly if you install the Python package elsewhere.
+
+### Allow unattended cap changes
+
+Status works without root. For cap changes, the server runs only the native
+executable with `/usr/bin/sudo -n`; it never prompts for a password and does
+not run the Python server as root. Install the native executable in a
+root-owned location:
+
+```bash
+sudo install -d -o root -g wheel -m 755 /Library/PrivilegedHelperTools
+sudo install -o root -g wheel -m 755 ./m5gpu /Library/PrivilegedHelperTools/m5gpu
+sudo visudo -f /etc/sudoers.d/m5gpu
+```
+
+Add this line, replacing `YOUR_USERNAME` with the agent's macOS account:
+
+```sudoers
+YOUR_USERNAME ALL=(root) NOPASSWD: /Library/PrivilegedHelperTools/m5gpu cap [1-9], /Library/PrivilegedHelperTools/m5gpu cap [1-9][0-9], /Library/PrivilegedHelperTools/m5gpu cap 100, /Library/PrivilegedHelperTools/m5gpu cap off
+```
+
+This permits only 1–100 W and removal of the cap. If you change the server's
+maximum, update this rule to match. Keep the executable and its parent
+directories root-owned and not writable by the agent. After source updates,
+rebuild and reinstall the native executable with the command above.
+
+An agent can then call `get_gpu_power_status`, `set_gpu_power_limit` with
+`{"watts": 40}`, and `remove_gpu_power_limit`. Caps persist across server
+shutdown and affect every app. Explicitly remove the cap when finished;
+the server does not undo a requested cap on exit.
+
+### Validation
+
+```bash
+make
+uv run python -m unittest discover -s tests -v
+```
+
+Tests cover MCP stdio initialization/discovery, telemetry results, rejection
+of zero and malformed inputs, cap/removal command construction, driver
+errors, sudo failures, and process cleanup. They do not change hardware caps.
 
 ## Measurement notes
 
